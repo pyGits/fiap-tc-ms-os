@@ -1,0 +1,59 @@
+{
+  "name": "fiap-tc-ms-os",
+  "version": "1.0.0",
+  "description": "Microsservico de Ordem de Servico (OS Service) - orquestrador da Saga - Tech Challenge FIAP SOAT Fase 4",
+  "main": "dist/src/index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "nodemon src/index.ts",
+    "build": "tsc",
+    "start": "node -r newrelic dist/src/index.js",
+    "start:local": "node dist/src/index.js",
+    "migrate": "knex migrate:latest --knexfile knexfile.ts",
+    "migrate:prod": "node dist/src/migrate.js",
+    "migrate:rollback": "knex migrate:rollback --knexfile knexfile.ts",
+    "test": "jest",
+    "test:coverage": "jest --coverage",
+    "test:bdd": "cucumber-js",
+    "test:all": "npm run test:coverage && npm run test:bdd",
+    "typecheck": "tsc --noEmit",
+    "k8s:render:hml": "kubectl kustomize k8s/overlays/hml",
+    "k8s:render:prd": "kubectl kustomize k8s/overlays/prd"
+  },
+  "dependencies": {
+    "amqplib": "^0.10.9",
+    "aws-jwt-verify": "^5.1.0",
+    "axios": "^1.13.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "knex": "^3.1.0",
+    "mysql2": "^3.15.3",
+    "newrelic": "^14.3.0",
+    "pino": "^10.0.0",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.1"
+  },
+  "devDependencies": {
+    "@cucumber/cucumber": "^12.2.0",
+    "@types/amqplib": "^0.10.7",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/jest": "^30.0.0",
+    "@types/newrelic": "^9.14.8",
+    "@types/supertest": "^6.0.3",
+    "@types/swagger-jsdoc": "^6.0.4",
+    "@types/swagger-ui-express": "^4.1.8",
+    "better-sqlite3": "^12.11.1",
+    "jest": "^30.2.0",
+    "nodemon": "^3.1.10",
+    "supertest": "^7.1.4",
+    "ts-jest": "^29.4.4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}

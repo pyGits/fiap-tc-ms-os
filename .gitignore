@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+.env
+*.log
+newrelic_agent.log
+tests/bdd/report.html
+.DS_Store

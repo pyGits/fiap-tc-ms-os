@@ -1,0 +1,114 @@
+name: Deploy do OS Service no EKS
+description: >
+  Aplica o microsserviço no cluster EKS: monta o Secret a partir do AWS Systems
+  Manager Parameter Store, renderiza o overlay do Kustomize com a imagem do ECR
+  e aguarda o rollout. Compartilhado pelos jobs de homologação e produção.
+
+inputs:
+  ambiente:
+    description: "hml ou prd"
+    required: true
+  imagem:
+    description: "Imagem completa no ECR (registry/repo:sha)"
+    required: true
+  cluster:
+    description: "Nome do cluster EKS"
+    required: true
+  regiao:
+    description: "Região AWS"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Configurar acesso ao cluster
+      shell: bash
+      run: |
+        aws eks update-kubeconfig \
+          --region "${{ inputs.regiao }}" \
+          --name "${{ inputs.cluster }}"
+
+    - name: Garantir o namespace
+      shell: bash
+      run: |
+        kubectl create namespace "fiap-${{ inputs.ambiente }}" \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    # O Secret deste serviço contém APENAS as credenciais do banco DELE. É o
+    # mecanismo que garante, na prática, o requisito "nenhum microsserviço
+    # acessa o banco de dados de outro": não há credencial para isso.
+    - name: Criar o Secret a partir do Parameter Store
+      shell: bash
+      env:
+        AMBIENTE: ${{ inputs.ambiente }}
+      run: |
+        set -euo pipefail
+
+        ler() {
+          aws ssm get-parameter --name "$1" --with-decryption \
+            --query 'Parameter.Value' --output text
+        }
+
+        DB_HOST=$(ler "/fiap/${AMBIENTE}/ms-os/db/host")
+        DB_PORT=$(ler "/fiap/${AMBIENTE}/ms-os/db/port")
+        DB_USER=$(ler "/fiap/${AMBIENTE}/ms-os/db/username")
+        DB_PASSWORD=$(ler "/fiap/${AMBIENTE}/ms-os/db/password")
+        DB_NAME=$(ler "/fiap/${AMBIENTE}/ms-os/db/name")
+        RABBITMQ_URL=$(ler "/fiap/${AMBIENTE}/mensageria/url")
+        NEW_RELIC_LICENSE_KEY=$(ler /fiap/shared/newrelic/license_key)
+
+        # Os parâmetros do Cognito só existem depois do primeiro deploy do
+        # repositório da Lambda de autenticação; até lá a aplicação sobe sem
+        # eles e responde 503 nas rotas protegidas, em vez de liberá-las.
+        COGNITO_USER_POOL_ID=$(ler "/fiap/${AMBIENTE}/cognito/user_pool_id" 2>/dev/null || echo "")
+        COGNITO_CLIENT_ID=$(ler "/fiap/${AMBIENTE}/cognito/client_id" 2>/dev/null || echo "")
+
+        kubectl -n "fiap-${AMBIENTE}" create secret generic ms-os-secret \
+          --from-literal=DB_HOST="$DB_HOST" \
+          --from-literal=DB_PORT="$DB_PORT" \
+          --from-literal=DB_USER="$DB_USER" \
+          --from-literal=DB_PASSWORD="$DB_PASSWORD" \
+          --from-literal=DB_NAME="$DB_NAME" \
+          --from-literal=RABBITMQ_URL="$RABBITMQ_URL" \
+          --from-literal=NEW_RELIC_LICENSE_KEY="$NEW_RELIC_LICENSE_KEY" \
+          --from-literal=COGNITO_USER_POOL_ID="$COGNITO_USER_POOL_ID" \
+          --from-literal=COGNITO_CLIENT_ID="$COGNITO_CLIENT_ID" \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Aplicar os manifestos
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "k8s/overlays/${{ inputs.ambiente }}"
+        # Aponta o overlay para a imagem recém-publicada no ECR, sem editar
+        # arquivo versionado.
+        kustomize edit set image "fiap-tc-ms-os=${{ inputs.imagem }}" 2>/dev/null \
+          || kubectl kustomize . > /dev/null
+        kubectl kustomize . > /tmp/render-ms-os.yaml
+        sed -i "s|image: fiap-tc-ms-os:.*|image: ${{ inputs.imagem }}|g" /tmp/render-ms-os.yaml
+        kubectl apply -f /tmp/render-ms-os.yaml
+
+    - name: Aguardar o rollout
+      shell: bash
+      run: |
+        kubectl -n "fiap-${{ inputs.ambiente }}" \
+          rollout status deployment/ms-os --timeout=300s
+
+    - name: Publicar o estado no resumo
+      shell: bash
+      run: |
+        {
+          echo "## Deploy do OS Service em ${{ inputs.ambiente }}"
+          echo ""
+          echo "Imagem: \`${{ inputs.imagem }}\`"
+          echo ""
+          echo '```'
+          kubectl -n "fiap-${{ inputs.ambiente }}" get pods,svc,hpa -l app=ms-os
+          echo '```'
+          echo ""
+          echo "DNS do Network Load Balancer interno (consumido pelo VPC Link do API Gateway):"
+          echo '```'
+          kubectl -n "fiap-${{ inputs.ambiente }}" get svc ms-os-service \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' || true
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"

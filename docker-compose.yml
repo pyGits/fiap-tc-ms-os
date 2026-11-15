@@ -1,0 +1,80 @@
+# Ambiente local do OS Service.
+#
+# Este compose é o PONTO DE PARTIDA do ambiente: além do serviço e do seu
+# MySQL, ele sobe o RabbitMQ e cria a rede `oficina-net`, usada pelos outros
+# dois microsserviços. Suba este primeiro:
+#
+#   docker compose up -d --build
+#   (depois, em cada outro repositório) docker compose up -d --build
+#
+# Painel do RabbitMQ: http://localhost:15672 (guest/guest)
+# API do OS Service:  http://localhost:3000/api-docs
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: oficina-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [oficina-net]
+
+  # Banco PRÓPRIO do OS Service. Billing e Execução não têm credencial aqui.
+  mysql-os:
+    image: mysql:8.0
+    container_name: oficina-mysql-os
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: fiap_tc_os
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - mysql-os-dados:/var/lib/mysql
+    networks: [oficina-net]
+
+  ms-os:
+    build: .
+    container_name: oficina-ms-os
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      NODE_ENV: production
+      SERVICE_NAME: fiap-tc-ms-os
+      DB_HOST: mysql-os
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: root
+      DB_NAME: fiap_tc_os
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      # Sem Cognito no ambiente local: as rotas sobem com usuário fixo.
+      AUTH_DISABLED: "true"
+      LOG_LEVEL: debug
+    # As migrations rodam no start do contêiner, como fazem no initContainer do
+    # Kubernetes — o mesmo artefato, o mesmo comando.
+    command: sh -c "node dist/src/migrate.js && node dist/src/index.js"
+    depends_on:
+      mysql-os:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks: [oficina-net]
+
+volumes:
+  mysql-os-dados:
+
+networks:
+  oficina-net:
+    name: oficina-net

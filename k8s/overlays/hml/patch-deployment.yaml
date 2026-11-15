@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ms-os
+spec:
+  # Homologação roda com menos réplicas para conter custo.
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: ms-os
+          imagePullPolicy: Always

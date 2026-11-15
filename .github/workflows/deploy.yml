@@ -1,0 +1,130 @@
+name: Deploy
+
+# Deploy automático e INDEPENDENTE deste microsserviço, no mesmo GitFlow da
+# Fase 3:
+#   merge em `develop` -> HOMOLOGAÇÃO (namespace fiap-hml)
+#   merge em `main`    -> PRODUÇÃO    (namespace fiap-prd)
+#
+# A imagem vai para o Amazon ECR e o rollout é aplicado no cluster EKS
+# provisionado pelo repositório fiap-tc-infra-k8s.
+on:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+    inputs:
+      ambiente:
+        description: "Ambiente de destino"
+        required: true
+        type: choice
+        options: [hml, prd]
+
+permissions:
+  contents: read
+
+jobs:
+  build-e-push:
+    name: Build e push da imagem no ECR
+    runs-on: ubuntu-latest
+    outputs:
+      imagem: ${{ steps.push.outputs.imagem }}
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Instalar dependências
+        run: npm ci
+
+      # Nada é publicado sem a suíte completa e a cobertura no patamar: o gate
+      # de qualidade vale também para o caminho do deploy, não só para o PR.
+      - name: Compilar e testar
+        run: |
+          npm run build
+          npm run test:coverage
+          npm run test:bdd
+
+      - name: Configurar credenciais AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Autenticar no Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Construir e publicar a imagem
+        id: push
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPOSITORIO: ${{ vars.ECR_REPOSITORY }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          IMAGEM="$REGISTRY/$REPOSITORIO:$SHA"
+          docker build -t "$IMAGEM" .
+          docker push "$IMAGEM"
+          echo "imagem=$IMAGEM" >> "$GITHUB_OUTPUT"
+          echo "Imagem publicada: $IMAGEM" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-hml:
+    name: Deploy em homologação
+    needs: build-e-push
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
+      (github.event_name == 'workflow_dispatch' && inputs.ambiente == 'hml')
+    runs-on: ubuntu-latest
+    environment: homologacao
+    concurrency: deploy-ms-os-hml
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciais AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Aplicar no cluster
+        uses: ./.github/actions/deploy-eks
+        with:
+          ambiente: hml
+          imagem: ${{ needs.build-e-push.outputs.imagem }}
+          cluster: ${{ vars.EKS_CLUSTER_NAME }}
+          regiao: ${{ vars.AWS_REGION }}
+
+  deploy-prd:
+    name: Deploy em produção
+    needs: build-e-push
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.ambiente == 'prd')
+    runs-on: ubuntu-latest
+    environment: producao
+    concurrency: deploy-ms-os-prd
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciais AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Aplicar no cluster
+        uses: ./.github/actions/deploy-eks
+        with:
+          ambiente: prd
+          imagem: ${{ needs.build-e-push.outputs.imagem }}
+          cluster: ${{ vars.EKS_CLUSTER_NAME }}
+          regiao: ${{ vars.AWS_REGION }}

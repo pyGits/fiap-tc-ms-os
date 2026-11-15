@@ -1,0 +1,127 @@
+name: CI
+
+# Integração contínua INDEPENDENTE deste microsserviço: cada repositório tem o
+# seu pipeline, roda a sua suíte e publica a sua imagem. Um serviço quebrado
+# não impede o deploy dos outros dois.
+#
+# É o job "ci" que o ruleset do repositório exige como status check obrigatório
+# antes de qualquer merge na `main` (branch protegida, merge só via Pull
+# Request).
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Build, testes e cobertura
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+        with:
+          # O Sonar usa o histórico para atribuir código novo a cada commit.
+          fetch-depth: 0
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Verificar tipos
+        run: npm run typecheck
+
+      - name: Compilar (TypeScript)
+        run: npm run build
+
+      # O patamar de 80% (statements, branches, functions, lines) está em
+      # coverageThreshold no jest.config.js: o próprio Jest encerra com código
+      # de erro se a cobertura cair, e o pipeline falha com ele.
+      - name: Testes unitários com cobertura (gate de 80%)
+        run: npm run test:coverage
+
+      - name: Testes de comportamento (BDD / Gherkin)
+        run: npm run test:bdd
+
+      - name: Publicar o resumo da cobertura
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -f coverage/coverage-summary.json ]; then
+            node -e '
+              const t = require("./coverage/coverage-summary.json").total;
+              const linha = (n, d) => `| ${n} | ${d.pct}% | ${d.covered}/${d.total} |`;
+              console.log("## Cobertura de testes\n");
+              console.log("| Métrica | % | Coberto |");
+              console.log("| --- | --- | --- |");
+              console.log(linha("Statements", t.statements));
+              console.log(linha("Branches", t.branches));
+              console.log(linha("Functions", t.functions));
+              console.log(linha("Lines", t.lines));
+            ' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Guardar o relatório de cobertura
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobertura-ms-os
+          path: |
+            coverage/
+            tests/bdd/report.html
+          retention-days: 14
+
+      - name: Validar manifestos Kubernetes (kustomize)
+        run: |
+          kubectl kustomize k8s/overlays/hml > /dev/null
+          kubectl kustomize k8s/overlays/prd > /dev/null
+          echo "Overlays hml e prd renderizados com sucesso."
+
+      - name: Construir imagem Docker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: fiap-tc-ms-os:ci
+
+  qualidade:
+    name: Análise estática e Quality Gate (SonarQube)
+    needs: ci
+    runs-on: ubuntu-latest
+    # Sem o token configurado o job é ignorado em vez de falhar: isso permite
+    # que forks e Pull Requests externos rodem o CI normalmente.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    env:
+      # Declarado no job para que os passos possam testar a presença do token.
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Recuperar o relatório de cobertura
+        uses: actions/download-artifact@v4
+        with:
+          name: cobertura-ms-os
+
+      - name: Analisar com o SonarQube
+        if: ${{ env.SONAR_TOKEN != '' }}
+        uses: SonarSource/sonarqube-scan-action@v4
+
+      # O Quality Gate é o que de fato barra o merge: cobertura, duplicação,
+      # bugs e vulnerabilidades reprovados interrompem o pipeline aqui.
+      - name: Aguardar o Quality Gate
+        if: ${{ env.SONAR_TOKEN != '' }}
+        uses: SonarSource/sonarqube-quality-gate-action@v1
+        timeout-minutes: 5

@@ -1,0 +1,406 @@
+{
+  "info": {
+    "name": "FIAP TC Fase 4 - OS Service (orquestrador da Saga)",
+    "description": "Microsserviço de Ordem de Serviço: API REST do cliente e orquestrador da Saga.\n\nA pasta \"Fluxo completo da Saga\" executa, na ordem, o caminho feliz de ponta a ponta. As pastas \"Rollback\" forçam as duas falhas controladas exigidas na demonstração.\n\nAs requisições guardam os identificadores criados em variáveis da coleção, então basta executar de cima para baixo (ou usar o Runner).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000", "type": "string" },
+    { "key": "token", "value": "", "type": "string" },
+    { "key": "clienteId", "value": "", "type": "string" },
+    { "key": "veiculoId", "value": "", "type": "string" },
+    { "key": "ordemServicoId", "value": "", "type": "string" },
+    { "key": "documento", "value": "52998224725", "type": "string" },
+    { "key": "placa", "value": "ABC1D23", "type": "string" }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+  },
+  "item": [
+    {
+      "name": "Saúde e documentação",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] },
+            "description": "Usado pelas probes de readiness e liveness do Kubernetes."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responde 200', () => pm.response.to.have.status(200));",
+                  "pm.test('identifica o serviço', () => pm.expect(pm.response.json().servico).to.eql('fiap-tc-ms-os'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /api-docs.json",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api-docs.json", "host": ["{{baseUrl}}"], "path": ["api-docs.json"] },
+            "description": "Contrato OpenAPI gerado a partir das anotações das rotas. A interface navegável fica em /api-docs."
+          }
+        },
+        {
+          "name": "GET /catalogo",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/catalogo", "host": ["{{baseUrl}}"], "path": ["catalogo"] },
+            "description": "Serviços e peças disponíveis. Os identificadores (srv-revisao, pec-filtro-oleo...) são os usados no corpo da abertura da OS."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Fluxo completo da Saga",
+      "item": [
+        {
+          "name": "1. POST /clientes",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"documento\": \"{{documento}}\",\n  \"nome\": \"Cliente Demonstracao\",\n  \"email\": \"cliente@oficina.local\",\n  \"telefone\": \"11999990000\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/clientes", "host": ["{{baseUrl}}"], "path": ["clientes"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  pm.collectionVariables.set('clienteId', pm.response.json().id);",
+                  "} else if (pm.response.code === 409) {",
+                  "  pm.test.skip('cliente já cadastrado — use GET /clientes para recuperar o id');",
+                  "}",
+                  "pm.test('criado ou já existente', () => pm.expect([201, 409]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2. POST /veiculos",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"placa\": \"{{placa}}\",\n  \"clienteId\": \"{{clienteId}}\",\n  \"marca\": \"Volkswagen\",\n  \"modelo\": \"Gol\",\n  \"ano\": 2019\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/veiculos", "host": ["{{baseUrl}}"], "path": ["veiculos"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  pm.collectionVariables.set('veiculoId', pm.response.json().id);",
+                  "}",
+                  "pm.test('criado ou já existente', () => pm.expect([201, 409]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3. POST /ordens-servico (inicia a Saga)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"clienteId\": \"{{clienteId}}\",\n  \"veiculoId\": \"{{veiculoId}}\",\n  \"itens\": [\n    { \"id\": \"srv-revisao\", \"quantidade\": 1 },\n    { \"id\": \"pec-filtro-oleo\", \"quantidade\": 2 }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/ordens-servico", "host": ["{{baseUrl}}"], "path": ["ordens-servico"] },
+            "description": "Executa o passo 1 da Saga (transação local) e publica GERAR_ORCAMENTO. A resposta é 202: o restante do fluxo é assíncrono."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('aceita e responde 202', () => pm.response.to.have.status(202));",
+                  "const corpo = pm.response.json();",
+                  "pm.collectionVariables.set('ordemServicoId', corpo.ordemServicoId || corpo.id);",
+                  "pm.test('devolve o id da Saga', () => pm.expect(corpo.sagaId || corpo.saga).to.not.be.undefined);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "4. GET /ordens-servico/{id} (acompanha a Saga)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/ordens-servico/{{ordemServicoId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["ordens-servico", "{{ordemServicoId}}"]
+            },
+            "description": "Depois do orçamento gerado, a OS fica em AGUARDANDO_APROVACAO com o valor total calculado pelo Billing."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('responde 200', () => pm.response.to.have.status(200));",
+                  "console.log('status da OS:', pm.response.json().status);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "5. POST /ordens-servico/{id}/aprovacao (cliente aprova)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"aprovado\": true\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/ordens-servico/{{ordemServicoId}}/aprovacao",
+              "host": ["{{baseUrl}}"],
+              "path": ["ordens-servico", "{{ordemServicoId}}", "aprovacao"]
+            },
+            "description": "Retoma a Saga: dispara REGISTRAR_PAGAMENTO e, com o pagamento aprovado, ENFILEIRAR_EXECUCAO."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('decisão registrada', () => pm.response.to.have.status(200));"]
+              }
+            }
+          ]
+        },
+        {
+          "name": "6. GET /ordens-servico/{id} (Saga concluída)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/ordens-servico/{{ordemServicoId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["ordens-servico", "{{ordemServicoId}}"]
+            },
+            "description": "Com os cinco passos concluídos, a OS está EM_EXECUCAO e o carro ocupa uma vaga na fila da oficina (ver o serviço de Execução)."
+          }
+        },
+        {
+          "name": "7. GET /ordens-servico/tempo-medio",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/ordens-servico/tempo-medio",
+              "host": ["{{baseUrl}}"],
+              "path": ["ordens-servico", "tempo-medio"]
+            },
+            "description": "Indicador herdado da Fase 3: tempo médio em cada status."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Rollback - falha no pagamento",
+      "item": [
+        {
+          "name": "POST /ordens-servico (simularFalhaPagamento)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"clienteId\": \"{{clienteId}}\",\n  \"veiculoId\": \"{{veiculoId}}\",\n  \"itens\": [\n    { \"id\": \"srv-revisao\", \"quantidade\": 1 }\n  ],\n  \"simularFalhaPagamento\": true\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/ordens-servico", "host": ["{{baseUrl}}"], "path": ["ordens-servico"] },
+            "description": "O provedor recusa a cobrança no passo 4. O orquestrador compensa o orçamento (CANCELAR_ORCAMENTO) e a OS termina CANCELADA — nenhum carro entra na fila."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Saga iniciada', () => pm.response.to.have.status(202));",
+                  "const corpo = pm.response.json();",
+                  "pm.collectionVariables.set('ordemServicoId', corpo.ordemServicoId || corpo.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /ordens-servico/{id}/aprovacao (aprova e a cobrança falha)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"aprovado\": true\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/ordens-servico/{{ordemServicoId}}/aprovacao",
+              "host": ["{{baseUrl}}"],
+              "path": ["ordens-servico", "{{ordemServicoId}}", "aprovacao"]
+            }
+          }
+        },
+        {
+          "name": "GET /ordens-servico/{id} (deve estar CANCELADA)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/ordens-servico/{{ordemServicoId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["ordens-servico", "{{ordemServicoId}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const corpo = pm.response.json();",
+                  "console.log('status da OS após o rollback:', corpo.status);",
+                  "pm.test('a Saga foi compensada', () => pm.expect(corpo.status).to.be.oneOf(['CANCELADA', 'AGUARDANDO_APROVACAO']));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Rollback - falha na execução",
+      "item": [
+        {
+          "name": "POST /ordens-servico (simularFalhaExecucao)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"clienteId\": \"{{clienteId}}\",\n  \"veiculoId\": \"{{veiculoId}}\",\n  \"itens\": [\n    { \"id\": \"srv-revisao\", \"quantidade\": 1 }\n  ],\n  \"simularFalhaExecucao\": true\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/ordens-servico", "host": ["{{baseUrl}}"], "path": ["ordens-servico"] },
+            "description": "A oficina recusa o serviço no passo 5 (último). A compensação roda em ORDEM INVERSA: estorna o pagamento e só depois cancela o orçamento."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Saga iniciada', () => pm.response.to.have.status(202));",
+                  "const corpo = pm.response.json();",
+                  "pm.collectionVariables.set('ordemServicoId', corpo.ordemServicoId || corpo.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /ordens-servico/{id}/aprovacao",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"aprovado\": true\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/ordens-servico/{{ordemServicoId}}/aprovacao",
+              "host": ["{{baseUrl}}"],
+              "path": ["ordens-servico", "{{ordemServicoId}}", "aprovacao"]
+            }
+          }
+        },
+        {
+          "name": "GET /ordens-servico/{id} (deve estar CANCELADA após o estorno)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/ordens-servico/{{ordemServicoId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["ordens-servico", "{{ordemServicoId}}"]
+            },
+            "description": "Confira no Billing (GET /pagamentos) que o pagamento está ESTORNADO e o orçamento CANCELADO."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Recusa do cliente",
+      "item": [
+        {
+          "name": "POST /ordens-servico/{id}/aprovacao (aprovado = false)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"aprovado\": false,\n  \"motivoRecusa\": \"Cliente achou o orcamento alto\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/ordens-servico/{{ordemServicoId}}/aprovacao",
+              "host": ["{{baseUrl}}"],
+              "path": ["ordens-servico", "{{ordemServicoId}}", "aprovacao"]
+            },
+            "description": "Recusa NÃO é falha técnica: a Saga encerra pelo caminho de negócio, cancelando o orçamento sem nunca ter cobrado."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Operação manual",
+      "item": [
+        {
+          "name": "GET /ordens-servico?status=EM_EXECUCAO",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/ordens-servico?status=EM_EXECUCAO",
+              "host": ["{{baseUrl}}"],
+              "path": ["ordens-servico"],
+              "query": [{ "key": "status", "value": "EM_EXECUCAO" }]
+            }
+          }
+        },
+        {
+          "name": "POST /ordens-servico/{id}/finalizacao",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/ordens-servico/{{ordemServicoId}}/finalizacao",
+              "host": ["{{baseUrl}}"],
+              "path": ["ordens-servico", "{{ordemServicoId}}", "finalizacao"]
+            },
+            "description": "Normalmente acionado pelo evento EXECUCAO_FINALIZADA publicado pelo serviço de Execução; exposto também para operação manual."
+          }
+        },
+        {
+          "name": "POST /ordens-servico/{id}/entrega",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/ordens-servico/{{ordemServicoId}}/entrega",
+              "host": ["{{baseUrl}}"],
+              "path": ["ordens-servico", "{{ordemServicoId}}", "entrega"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,101 @@
+# ---------------------------------------------------------------------------
+# Broker de mensageria do ambiente de HOMOLOGAÇÃO.
+#
+# Em produção a recomendação é um broker gerenciado (Amazon MQ for RabbitMQ):
+# ele é infraestrutura compartilhada entre os três microsserviços e não deveria
+# ter seu ciclo de vida preso ao deploy de nenhum deles. Este manifesto existe
+# para que o ambiente de homologação — e a demonstração em vídeo — possam subir
+# sem depender de recurso pago.
+#
+# Aplicado UMA vez, fora do pipeline dos serviços:
+#   kubectl apply -f k8s/shared/rabbitmq.yaml
+#
+# Os serviços encontram o broker por DNS interno do cluster e recebem a URL
+# pelo Secret (RABBITMQ_URL), nunca por hardcode:
+#   amqp://<usuario>:<senha>@rabbitmq.fiap-hml.svc.cluster.local:5672
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: fiap-hml
+  labels:
+    app: rabbitmq
+spec:
+  # Headless: o StatefulSet dá a cada pod um nome DNS estável.
+  clusterIP: None
+  selector:
+    app: rabbitmq
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: amqp
+    - name: management
+      port: 15672
+      targetPort: management
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  namespace: fiap-hml
+spec:
+  serviceName: rabbitmq
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3.13-management-alpine
+          ports:
+            - name: amqp
+              containerPort: 5672
+            - name: management
+              containerPort: 15672
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: usuario
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: senha
+          readinessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "-q", "check_running"]
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          livenessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "-q", "ping"]
+            initialDelaySeconds: 40
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: dados
+              mountPath: /var/lib/rabbitmq
+  volumeClaimTemplates:
+    # Fila durável só sobrevive ao restart do pod se o diretório de dados for
+    # persistente: sem isso, uma mensagem de compensação pendente se perderia.
+    - metadata:
+        name: dados
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi
