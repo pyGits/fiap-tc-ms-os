@@ -160,7 +160,7 @@ describe("AbrirOrdemServicoUseCase", () => {
     ).rejects.toThrow("Estoque insuficiente");
   });
 
-  it("guarda as flags de simulacao de falha nos dados da Saga", async () => {
+  it("persiste as flags de simulacao de falha nos dados da Saga", async () => {
     const container = novoContainer();
     const { cliente, veiculo } = await semear(container);
 
@@ -174,6 +174,70 @@ describe("AbrirOrdemServicoUseCase", () => {
 
     const saga = await container.sagaRepository.obter(resultado.sagaId);
     expect(saga?.dados.simularFalhaPagamento).toBe(true);
+    expect(saga?.dados.simularFalhaExecucao).toBe(false);
+  });
+
+  // REGRESSAO: as flags chegavam ao participante apenas quando a instancia da
+  // Saga continuava em memoria. Os passos 4 e 5 recarregam a Saga do banco
+  // antes de publicar o comando, portanto uma flag registrada DEPOIS do
+  // primeiro `salvar` era perdida - e os dois rollbacks da demonstracao nunca
+  // disparavam, mesmo com a suite verde.
+  it("repassa simularFalhaPagamento no comando REGISTRAR_PAGAMENTO", async () => {
+    const container = novoContainer();
+    const { cliente, veiculo } = await semear(container);
+    const mensageria = container.mensageria as MensageriaGatewayMemoria;
+
+    const aberta = await container.abrirOrdemServico.execute({
+      clienteId: cliente.id.getValue(),
+      veiculoId: veiculo.id.getValue(),
+      itens: [{ id: "srv-revisao", quantidade: 1 }],
+      correlationId: "corr-1",
+      simularFalhaPagamento: true,
+    });
+
+    await container.orquestrador.orcamentoGerado(aberta.sagaId, "orc-1", 450);
+    await container.decidirOrcamento.execute({
+      ordemServicoId: aberta.ordemServicoId,
+      aprovado: true,
+    });
+
+    const comando = mensageria.enviadas.find(
+      (m) => m.tipo === "REGISTRAR_PAGAMENTO",
+    );
+    expect(comando?.body.simularFalha).toBe(true);
+  });
+
+  it("repassa simularFalhaExecucao no comando ENFILEIRAR_EXECUCAO", async () => {
+    const container = novoContainer();
+    const { cliente, veiculo } = await semear(container);
+    const mensageria = container.mensageria as MensageriaGatewayMemoria;
+
+    const aberta = await container.abrirOrdemServico.execute({
+      clienteId: cliente.id.getValue(),
+      veiculoId: veiculo.id.getValue(),
+      itens: [{ id: "srv-revisao", quantidade: 1 }],
+      correlationId: "corr-1",
+      simularFalhaExecucao: true,
+    });
+
+    await container.orquestrador.orcamentoGerado(aberta.sagaId, "orc-1", 450);
+    await container.decidirOrcamento.execute({
+      ordemServicoId: aberta.ordemServicoId,
+      aprovado: true,
+    });
+    await container.orquestrador.pagamentoRegistrado(aberta.sagaId, "pag-1");
+
+    const comando = mensageria.enviadas.find(
+      (m) => m.tipo === "ENFILEIRAR_EXECUCAO",
+    );
+    expect(comando?.body.simularFalha).toBe(true);
+
+    // O pagamento do mesmo fluxo NAO deve ser afetado: so o passo indicado
+    // falha, caso contrario a demonstracao mostraria o rollback errado.
+    const pagamento = mensageria.enviadas.find(
+      (m) => m.tipo === "REGISTRAR_PAGAMENTO",
+    );
+    expect(pagamento?.body.simularFalha).toBe(false);
   });
 });
 

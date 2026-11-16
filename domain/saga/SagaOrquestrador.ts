@@ -15,6 +15,14 @@ export type ResultadoPasso = {
   dados?: Record<string, unknown>;
 };
 
+// Falhas controladas pedidas na abertura da OS, usadas para demonstrar o
+// rollback da Saga. Nao fazem parte do fluxo de negocio: cada flag faz o
+// participante do passo correspondente responder com falha.
+export type SimulacoesSaga = {
+  simularFalhaPagamento?: boolean;
+  simularFalhaExecucao?: boolean;
+};
+
 // ORQUESTRADOR DA SAGA
 // ---------------------------------------------------------------------------
 // Implementa o padrao Saga na modalidade ORQUESTRADA (Aula 2 do SAGA Pattern):
@@ -47,16 +55,23 @@ export default class SagaOrquestrador {
     correlationId: string,
     itens: ItemOrcamento[],
     clienteEmail?: string,
+    simulacoes?: SimulacoesSaga,
   ): Promise<SagaOrdemServico> {
     const saga = new SagaOrdemServico({
       ordemServicoId: ordemServico.id.getValue(),
       correlationId,
       passos: criarPassosSagaOrdemServico(),
+      // As flags de simulacao entram aqui, ANTES do primeiro salvar: os passos
+      // 4 e 5 recarregam a Saga do banco, portanto so leem o que foi
+      // persistido. Registra-las depois de `iniciar` as deixaria apenas na
+      // instancia em memoria, e o rollback nunca seria acionado.
       dadosNegocio: {
         clienteId: ordemServico.clienteId,
         veiculoId: ordemServico.veiculoId,
         clienteEmail,
         itens,
+        simularFalhaPagamento: Boolean(simulacoes?.simularFalhaPagamento),
+        simularFalhaExecucao: Boolean(simulacoes?.simularFalhaExecucao),
       },
     });
 

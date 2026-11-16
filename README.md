@@ -351,22 +351,43 @@ branch protegida `main`:
 6. build da imagem Docker;
 7. job `qualidade`: análise **SonarQube** + espera do **Quality Gate**.
 
-**`deploy.yml`** — GitFlow, um ambiente por branch:
+**`deploy.yml`** — deploy automatizado em Kubernetes, GitFlow com um ambiente
+por branch:
 
 | Merge em | Ambiente | Namespace |
 | --- | --- | --- |
 | `develop` | homologação | `fiap-hml` |
 | `main` | produção | `fiap-prd` |
 
-O job publica a imagem no **Amazon ECR** com a tag do SHA do commit, monta o
-Secret a partir do **AWS Systems Manager Parameter Store**, renderiza o overlay
-do Kustomize e aguarda o `rollout status`. Manifestos em [`k8s/`](k8s/):
+O cluster é criado pelo próprio pipeline com **kind** (Kubernetes in Docker) no
+runner e destruído no fim do job — a decisão e o que ela *não* prova estão em
+[ADR-019](docs/adr/ADR-019-deploy-em-cluster-efemero-no-ci.md). A sequência:
+
+1. build + `test:coverage` + `test:bdd` — **nada é implantado sem o gate**;
+2. imagem Docker construída e carregada no cluster (`kind load docker-image`);
+3. dependências efêmeras do serviço ([`k8s/ci/`](k8s/ci/)): MySQL e RabbitMQ;
+4. `Secret` do serviço, **só** com as credenciais do banco dele;
+5. overlay do Kustomize renderizado e aplicado;
+6. `kubectl rollout status` — só retorna depois do initContainer de migrations
+   e do *readiness probe*;
+7. *smoke test* em `/health` dentro do cluster, via `port-forward`.
+
+O estado dos objetos e os logs das migrations ficam publicados no resumo do
+job, que é a evidência do deploy.
+
+**`deploy-eks.yml`** — o caminho para **Amazon EKS** da Fase 3 (imagem no ECR,
+Secret a partir do **AWS Systems Manager Parameter Store**), preservado e com
+disparo **apenas manual**. A Fase 4 não exige nuvem, e não há cluster
+gerenciado no ar; quando houver, este volta a ser o caminho padrão.
+
+Manifestos em [`k8s/`](k8s/):
 
 ```
 k8s/base/            configmap, deployment (com initContainer de migrations), service, hpa
 k8s/overlays/hml/    namespace fiap-hml, 1 réplica, LOG_LEVEL=debug
 k8s/overlays/prd/    namespace fiap-prd, 2 réplicas, HPA 2–10
 k8s/shared/          RabbitMQ de homologação (aplicado uma vez, fora do pipeline)
+k8s/ci/              MySQL e RabbitMQ efêmeros, usados SÓ pelo cluster do pipeline
 ```
 
 ```bash
@@ -438,6 +459,7 @@ As decisões de arquitetura desta fase estão em [`docs/adr/`](docs/adr/):
 | [ADR-016](docs/adr/ADR-016-rabbitmq-como-broker.md) | RabbitMQ como broker de mensageria |
 | [ADR-017](docs/adr/ADR-017-persistencia-poliglota.md) | Persistência poliglota: MySQL no OS, MongoDB nos participantes |
 | [ADR-018](docs/adr/ADR-018-idempotencia-e-dead-letter.md) | Idempotência durável e *dead letter* |
+| [ADR-019](docs/adr/ADR-019-deploy-em-cluster-efemero-no-ci.md) | Deploy automatizado em cluster Kubernetes efêmero no CI |
 
 Os ADRs 001 a 013 e os RFCs da Fase 3 seguem válidos no repositório
 [fiap-tc-app](https://github.com/pyGits/fiap-tc-app).

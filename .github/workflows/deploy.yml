@@ -1,12 +1,19 @@
 name: Deploy
 
-# Deploy automático e INDEPENDENTE deste microsserviço, no mesmo GitFlow da
-# Fase 3:
+# Deploy automatizado e INDEPENDENTE deste microsserviço em ambiente
+# Kubernetes, no mesmo GitFlow da Fase 3:
 #   merge em `develop` -> HOMOLOGAÇÃO (namespace fiap-hml)
 #   merge em `main`    -> PRODUÇÃO    (namespace fiap-prd)
 #
-# A imagem vai para o Amazon ECR e o rollout é aplicado no cluster EKS
-# provisionado pelo repositório fiap-tc-infra-k8s.
+# O cluster é criado pelo próprio pipeline com kind (Kubernetes in Docker) e
+# destruído no fim da execução. A escolha está registrada no ADR-019: o
+# requisito da fase é "deploy automatizado em ambiente Kubernetes", e um cluster
+# efêmero no runner cumpre isso de forma reproduzível pela banca — qualquer
+# pessoa pode reexecutar o workflow e ver o mesmo resultado, sem depender de uma
+# conta de nuvem que estará desligada quando a entrega for corrigida.
+#
+# O caminho para Amazon EKS continua escrito e versionado em
+# .github/workflows/deploy-eks.yml, acionável sob demanda.
 on:
   push:
     branches: [develop, main]
@@ -21,15 +28,32 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: deploy-ms-os-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  build-e-push:
-    name: Build e push da imagem no ECR
+  deploy:
+    name: Deploy automatizado em Kubernetes
     runs-on: ubuntu-latest
-    outputs:
-      imagem: ${{ steps.push.outputs.imagem }}
     steps:
       - name: Checkout do código
         uses: actions/checkout@v4
+
+      - name: Definir o ambiente de destino
+        id: alvo
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            AMBIENTE="${{ inputs.ambiente }}"
+          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            AMBIENTE="prd"
+          else
+            AMBIENTE="hml"
+          fi
+          echo "ambiente=$AMBIENTE"        >> "$GITHUB_OUTPUT"
+          echo "namespace=fiap-$AMBIENTE"  >> "$GITHUB_OUTPUT"
+          echo "imagem=fiap-tc-ms-os:${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
       - name: Configurar Node.js
         uses: actions/setup-node@v4
@@ -40,91 +64,128 @@ jobs:
       - name: Instalar dependências
         run: npm ci
 
-      # Nada é publicado sem a suíte completa e a cobertura no patamar: o gate
+      # Nada é implantado sem a suíte completa e a cobertura no patamar: o gate
       # de qualidade vale também para o caminho do deploy, não só para o PR.
+      # É este passo que atende "deploy automatizado com validação de testes".
       - name: Compilar e testar
         run: |
           npm run build
           npm run test:coverage
           npm run test:bdd
 
-      - name: Configurar credenciais AWS
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Construir a imagem
+        run: docker build -t "${{ steps.alvo.outputs.imagem }}" .
+
+      - name: Criar o cluster Kubernetes (kind)
+        uses: helm/kind-action@v1.10.0
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
+          cluster_name: fiap-fase4
+          node_image: kindest/node:v1.31.0
 
-      - name: Autenticar no Amazon ECR
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
+      - name: Carregar a imagem no cluster
+        run: kind load docker-image "${{ steps.alvo.outputs.imagem }}" --name fiap-fase4
 
-      - name: Construir e publicar a imagem
-        id: push
-        env:
-          REGISTRY: ${{ steps.ecr.outputs.registry }}
-          REPOSITORIO: ${{ vars.ECR_REPOSITORY }}
-          SHA: ${{ github.sha }}
+      - name: Garantir o namespace
+        run: |
+          kubectl create namespace "${{ steps.alvo.outputs.namespace }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      # Banco e mensageria efêmeros, só para este cluster. Em cluster real são
+      # banco gerenciado e o RabbitMQ de k8s/shared/rabbitmq.yaml.
+      - name: Subir as dependências (MySQL e RabbitMQ)
         run: |
           set -euo pipefail
-          IMAGEM="$REGISTRY/$REPOSITORIO:$SHA"
-          docker build -t "$IMAGEM" .
-          docker push "$IMAGEM"
-          echo "imagem=$IMAGEM" >> "$GITHUB_OUTPUT"
-          echo "Imagem publicada: $IMAGEM" >> "$GITHUB_STEP_SUMMARY"
+          NS="${{ steps.alvo.outputs.namespace }}"
+          kubectl -n "$NS" apply -f k8s/ci/dependencias.yaml
+          kubectl -n "$NS" rollout status deployment/mysql    --timeout=300s
+          kubectl -n "$NS" rollout status deployment/rabbitmq --timeout=300s
 
-  deploy-hml:
-    name: Deploy em homologação
-    needs: build-e-push
-    if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
-      (github.event_name == 'workflow_dispatch' && inputs.ambiente == 'hml')
-    runs-on: ubuntu-latest
-    environment: homologacao
-    concurrency: deploy-ms-os-hml
-    steps:
-      - name: Checkout do código
-        uses: actions/checkout@v4
+      # O Secret deste serviço contém APENAS as credenciais do banco DELE. É o
+      # mecanismo que garante, na prática, o requisito "nenhum microsserviço
+      # acessa o banco de dados de outro": não há credencial para isso.
+      #
+      # No EKS os valores vêm do AWS Systems Manager Parameter Store; aqui
+      # apontam para os serviços efêmeros do cluster. A licença do New Relic
+      # fica vazia de propósito: sem ela o agente se desabilita e a conta de
+      # observabilidade não recebe telemetria de execução de pipeline.
+      - name: Criar o Secret do serviço
+        run: |
+          set -euo pipefail
+          kubectl -n "${{ steps.alvo.outputs.namespace }}" \
+            create secret generic ms-os-secret \
+            --from-literal=DB_HOST=mysql \
+            --from-literal=DB_PORT=3306 \
+            --from-literal=DB_USER=root \
+            --from-literal=DB_PASSWORD=root \
+            --from-literal=DB_NAME=fiap_tc_os \
+            --from-literal=RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672 \
+            --from-literal=NEW_RELIC_LICENSE_KEY= \
+            --from-literal=COGNITO_USER_POOL_ID= \
+            --from-literal=COGNITO_CLIENT_ID= \
+            --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Configurar credenciais AWS
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
+      - name: Aplicar os manifestos do overlay
+        run: |
+          set -euo pipefail
+          kubectl kustomize "k8s/overlays/${{ steps.alvo.outputs.ambiente }}" > render.yaml
+          # Aponta o overlay para a imagem recém-construída, sem editar arquivo
+          # versionado (no EKS a mesma substituição recebe a URI do ECR).
+          sed -i "s|image: fiap-tc-ms-os:.*|image: ${{ steps.alvo.outputs.imagem }}|g" render.yaml
+          # Os overlays usam `imagePullPolicy: Always`, que é o certo para um
+          # registry remoto (a tag do ECR pode ser reescrita). Aqui não existe
+          # registry: a imagem foi colocada no nó por `kind load`, então o nó
+          # precisa usá-la do disco em vez de tentar baixá-la.
+          sed -i "s|imagePullPolicy: Always|imagePullPolicy: IfNotPresent|g" render.yaml
+          kubectl apply -f render.yaml
 
-      - name: Aplicar no cluster
-        uses: ./.github/actions/deploy-eks
-        with:
-          ambiente: hml
-          imagem: ${{ needs.build-e-push.outputs.imagem }}
-          cluster: ${{ vars.EKS_CLUSTER_NAME }}
-          regiao: ${{ vars.AWS_REGION }}
+      # O initContainer `migrate` roda aqui: se as migrations falharem, o pod
+      # não fica Ready e este passo derruba o pipeline.
+      - name: Aguardar o rollout
+        run: |
+          kubectl -n "${{ steps.alvo.outputs.namespace }}" \
+            rollout status deployment/ms-os --timeout=300s
 
-  deploy-prd:
-    name: Deploy em produção
-    needs: build-e-push
-    if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'workflow_dispatch' && inputs.ambiente == 'prd')
-    runs-on: ubuntu-latest
-    environment: producao
-    concurrency: deploy-ms-os-prd
-    steps:
-      - name: Checkout do código
-        uses: actions/checkout@v4
+      - name: Validar o serviço no cluster (smoke test)
+        run: |
+          set -euo pipefail
+          NS="${{ steps.alvo.outputs.namespace }}"
+          kubectl -n "$NS" port-forward service/ms-os-service 8080:80 >/dev/null 2>&1 &
+          PF=$!
+          trap 'kill $PF 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health > resposta.json 2>/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          cat resposta.json
+          grep -q '"status":"ok"' resposta.json
 
-      - name: Configurar credenciais AWS
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
+      - name: Publicar o estado no resumo
+        if: always()
+        run: |
+          NS="${{ steps.alvo.outputs.namespace }}"
+          {
+            echo "## Deploy do OS Service em ${{ steps.alvo.outputs.ambiente }}"
+            echo ""
+            echo "Cluster: kind \`fiap-fase4\` (efêmero) · Namespace: \`$NS\`"
+            echo ""
+            echo "Imagem: \`${{ steps.alvo.outputs.imagem }}\`"
+            echo ""
+            echo '```'
+            kubectl -n "$NS" get deployment,pod,svc,hpa -l app=ms-os 2>&1 || true
+            echo '```'
+            echo ""
+            echo "### Migrations (initContainer)"
+            echo '```'
+            kubectl -n "$NS" logs -l app=ms-os -c migrate --tail=30 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Aplicar no cluster
-        uses: ./.github/actions/deploy-eks
-        with:
-          ambiente: prd
-          imagem: ${{ needs.build-e-push.outputs.imagem }}
-          cluster: ${{ vars.EKS_CLUSTER_NAME }}
-          regiao: ${{ vars.AWS_REGION }}
+      - name: Diagnóstico em caso de falha
+        if: failure()
+        run: |
+          NS="${{ steps.alvo.outputs.namespace }}"
+          kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -40 || true
+          kubectl -n "$NS" describe deployment/ms-os || true
+          kubectl -n "$NS" logs -l app=ms-os --all-containers --tail=100 || true
