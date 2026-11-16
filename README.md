@@ -1,5 +1,9 @@
 # fiap-tc-ms-os — Ordem de Serviço e orquestrador da Saga
 
+> **Tech Challenge — Pós-Tech SOAT (FIAP) — Fase 4**
+> **Eric Kanno Rodrigues de Araujo** — RM 371731 — Grupo 45 — Discord: `peeyote`
+> Vídeo da entrega: <https://youtu.be/Nlk2cV31lzk>
+
 Microsserviço de **Ordem de Serviço** da oficina mecânica. Acumula dois papéis:
 
 1. **API REST** de entrada do cliente (abrir OS, aprovar orçamento, consultar);
