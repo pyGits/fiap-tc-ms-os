@@ -1,0 +1,137 @@
+# Dependências EFÊMERAS do pipeline — existem só dentro do cluster kind que o
+# GitHub Actions cria e destrói em cada execução do workflow "Deploy".
+#
+# NÃO é o ambiente real: em um cluster de verdade o MySQL seria um banco
+# gerenciado (RDS) e o RabbitMQ viria de k8s/shared/rabbitmq.yaml, com volume
+# persistente. Aqui tudo é emptyDir, porque o cluster morre no fim do job.
+#
+# A razão de existirem: o OS Service falha rápido e de propósito quando não
+# alcança a mensageria (src/index.ts), e o initContainer `migrate` precisa do
+# banco. Sem estes dois, o pod nunca ficaria Ready e o `rollout status` do
+# pipeline acusaria uma falha que não é da aplicação.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  labels:
+    app: mysql
+    fiap.io/efemero: "true"
+spec:
+  selector:
+    app: mysql
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  labels:
+    app: mysql
+    fiap.io/efemero: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          args:
+            # Reduz o consumo de memória: o runner do GitHub Actions tem 7 GB
+            # para o cluster inteiro.
+            - --performance-schema=OFF
+            - --innodb-buffer-pool-size=64M
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              value: root
+            - name: MYSQL_DATABASE
+              value: fiap_tc_os
+          ports:
+            - containerPort: 3306
+          readinessProbe:
+            exec:
+              command: ["mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "384Mi"
+            limits:
+              memory: "1Gi"
+          volumeMounts:
+            - name: dados
+              mountPath: /var/lib/mysql
+      volumes:
+        - name: dados
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  labels:
+    app: rabbitmq
+    fiap.io/efemero: "true"
+spec:
+  selector:
+    app: rabbitmq
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: 5672
+    - name: management
+      port: 15672
+      targetPort: 15672
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  labels:
+    app: rabbitmq
+    fiap.io/efemero: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3.13-management-alpine
+          ports:
+            - containerPort: 5672
+            - containerPort: 15672
+          readinessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              memory: "768Mi"
+          volumeMounts:
+            - name: dados
+              mountPath: /var/lib/rabbitmq
+      volumes:
+        - name: dados
+          emptyDir: {}
