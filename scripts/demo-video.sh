@@ -232,7 +232,7 @@ nota "pagamento ESTORNADO — o dinheiro voltou"
 req GET "$BILLING_URL/orcamentos/ordem-servico/$OS_FALHA_EXEC"
 nota "orçamento CANCELADO depois do estorno: é o documento que o justifica"
 req GET "$OS_URL/ordens-servico/$OS_FALHA_EXEC"
-nota "OS CANCELADA, Saga SAGA_COMPENSADA — nenhum efeito colateral pendente"
+nota "OS CANCELADA e Saga COMPENSADA: passo 5 FALHOU, passos 4, 2 e 1 COMPENSADOS"
 pausa
 
 # ===========================================================================
