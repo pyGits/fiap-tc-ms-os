@@ -88,21 +88,20 @@ export default class AbrirOrdemServicoUseCase {
 
     await this.ordemServicoRepository.salvar(ordemServico);
 
+    // As flags de simulacao vao JUNTO com a criacao da Saga: os passos 4 e 5
+    // recarregam a Saga do banco antes de publicar o comando, portanto elas
+    // precisam estar persistidas desde o inicio para serem repassadas ao
+    // participante quando o passo correspondente for executado.
     const saga = await this.orquestrador.iniciar(
       ordemServico,
       input.correlationId,
       itensMensagem,
       cliente.email?.getValue(),
+      {
+        simularFalhaPagamento: input.simularFalhaPagamento,
+        simularFalhaExecucao: input.simularFalhaExecucao,
+      },
     );
-
-    // As flags de simulacao ficam nos dados da Saga para serem repassadas ao
-    // participante apenas quando o passo correspondente for executado.
-    if (input.simularFalhaPagamento || input.simularFalhaExecucao) {
-      saga.registrarDados({
-        simularFalhaPagamento: Boolean(input.simularFalhaPagamento),
-        simularFalhaExecucao: Boolean(input.simularFalhaExecucao),
-      });
-    }
 
     ordemServico.sagaId = saga.id.getValue();
     await this.ordemServicoRepository.atualizar(ordemServico);
